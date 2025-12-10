@@ -5,127 +5,161 @@ import (
     "io"
     "log"
     "os/exec"
+    "sync"
     "time"
 )
 
-// ChannelConfig holds the settings for the stream
+// ChannelConfig holds the settings for a single stream
 type ChannelConfig struct {
     Name      string
     IP        string
     Port      string
     Provider  string
     ServiceID string
-    Playlist  []string // List of YouTube URLs
+    Playlist  []string // Unique playlist for this channel
 }
 
 func main() {
-    // 1. Define the Single Channel
-    myChannel := ChannelConfig{
-        Name:      "My YouTube TV",
-        IP:        "239.255.0.1",
-        Port:      "1234",
-        Provider:  "Custom Broadcast",
-        ServiceID: "101",
-        Playlist: []string{
-            "https://www.youtube.com/watch?v=aqz-KE-bpKQ", // Example: Big Buck Bunny
-            "https://www.youtube.com/watch?v=LXb3EKWsInQ", // Example: 4K Costa Rica
-            // Add more URLs here
+    // 1. Define 3 Channels with distinct Playlists
+    channels := []ChannelConfig{
+        {
+            Name:      "Nature 4K",
+            IP:        "239.255.0.1",
+            Port:      "1234",
+            Provider:  "Earth Cast",
+            ServiceID: "101",
+            Playlist: []string{
+                "https://www.youtube.com/watch?v=LXb3EKWsInQ", // Costa Rica 4K
+                "https://www.youtube.com/watch?v=tO01J-M3g0U", // Animals 4K
+            },
+        },
+        {
+            Name:      "Tech TV",
+            IP:        "239.255.0.2",
+            Port:      "1234",
+            Provider:  "Geek Net",
+            ServiceID: "102",
+            Playlist: []string{
+                "https://www.youtube.com/watch?v=jfKfPfyJRdk", // Lofi Girl (Live Stream)
+                "https://www.youtube.com/watch?v=fJ9rUzIMcZQ", // Queen - Bohemian Rhapsody
+            },
+        },
+        {
+            Name:      "Action Sports",
+            IP:        "239.255.0.3",
+            Port:      "1234",
+            Provider:  "Adrenaline",
+            ServiceID: "103",
+            Playlist: []string{
+                "https://www.youtube.com/watch?v=qQdN4Q9I4G0", // Red Bull F1
+                "https://www.youtube.com/watch?v=x76VEPXYaI0", // GoPro Hero
+            },
         },
     }
 
-    fmt.Println("--- Starting YouTube IPTV Simulator ---")
-    fmt.Printf("Broadcasting to udp://%s:%s\n", myChannel.IP, myChannel.Port)
+    var wg sync.WaitGroup
 
-    // 2. Loop Forever (24/7 Channel Logic)
+    fmt.Println("--- Starting Multi-Channel YouTube Broadcaster ---")
+    fmt.Println("--- Press Ctrl+C to Stop ---")
+
+    for _, ch := range channels {
+        wg.Add(1)
+        // Launch each channel in a background Goroutine
+        go func(c ChannelConfig) {
+            defer wg.Done()
+            runChannelLoop(c)
+        }(ch)
+    }
+
+    wg.Wait()
+}
+
+// runChannelLoop handles the infinite playlist loop for a specific channel
+func runChannelLoop(config ChannelConfig) {
+    fmt.Printf("[%s] Channel Online -> udp://%s:%s\n", config.Name, config.IP, config.Port)
+
     for {
-        for _, videoURL := range myChannel.Playlist {
-            fmt.Printf("[NEXT UP] Playing: %s\n", videoURL)
-            err := streamVideo(myChannel, videoURL)
+        for _, videoURL := range config.Playlist {
+            fmt.Printf("[%s] Now Playing: %s\n", config.Name, videoURL)
+
+            err := streamVideo(config, videoURL)
+
             if err != nil {
-                log.Printf("[ERROR] Failed to stream video: %v\n", err)
-                // Sleep briefly to prevent tight loop crashing on bad internet
-                time.Sleep(2 * time.Second)
+                log.Printf("[%s] Stream Error: %v\n", config.Name, err)
+                // Sleep to prevent rapid-fire crashing if internet is down
+                time.Sleep(5 * time.Second)
             }
         }
-        fmt.Println("[PLAYLIST END] Looping back to start...")
+        fmt.Printf("[%s] Playlist finished. Looping...\n", config.Name)
     }
 }
 
 func streamVideo(config ChannelConfig, youtubeURL string) error {
     udpURL := fmt.Sprintf("udp://%s:%s?pkt_size=1316", config.IP, config.Port)
 
-    // --- COMMAND 1: yt-dlp ---
-    // We stream the data to Stdout ("-o -").
-    // We force a format compatible with streaming to prevent waiting for merges.
+    // 1. yt-dlp Command
     ytCmd := exec.Command("yt-dlp", "-o", "-", youtubeURL)
-
-    // Create a pipe to connect yt-dlp output to ffmpeg input
     pipeReader, pipeWriter := io.Pipe()
     ytCmd.Stdout = pipeWriter
-    ytCmd.Stderr = nil // Ignore yt-dlp progress logs for cleaner output
+    ytCmd.Stderr = nil // discard logs
 
-    // --- COMMAND 2: ffmpeg ---
+    // 2. Build the FFmpeg Filter String
+    // We chain filters: Scale -> DrawText (Watermark)
+    // "box=1:boxcolor=black@0.5" creates a semi-transparent background box behind the text
+    filterGraph := fmt.Sprintf(
+        "scale=1280:720,drawtext=text='%s':x=50:y=50:fontsize=48:fontcolor=white:box=1:boxcolor=black@0.5",
+        config.Name,
+    )
+
+    // 3. FFmpeg Command
     ffmpegCmd := exec.Command(
         "ffmpeg",
-        "-re",        // Read input at native frame rate
-        "-i", "pipe:0", // Read from Standard Input (the pipe)
+        "-re",
+        "-i", "pipe:0",
 
-        // Video Encoding
+        // Video Settings
         "-c:v", "libx264",
-        "-preset", "veryfast",
+        "-preset", "ultrafast", // Critical for running 3 streams at once
         "-tune", "zerolatency",
-        "-maxrate", "3000k", // Limit bitrate to keep UDP stable
-        "-bufsize", "6000k",
+        "-maxrate", "2500k",
+        "-bufsize", "5000k",
         "-pix_fmt", "yuv420p",
-        "-g", "60", // Keyframe interval (2 seconds at 30fps)
+        "-g", "60",
 
-        // FILTER: Scale everything to 720p.
-        // This is CRITICAL. If you don't scale, the stream crashes
-        // when switching between a 1080p video and a 4k video.
-        "-vf", "scale=1280:720",
+        // Apply Scaling + Watermark
+        "-vf", filterGraph,
 
-        // Audio Encoding (Must re-encode as AAC for TS compliance)
+        // Audio Settings
         "-c:a", "aac",
         "-b:a", "128k",
         "-ar", "44100",
 
-        // Output Format
+        // Output Settings
         "-f", "mpegts",
         "-mpegts_service_id", config.ServiceID,
         "-metadata", "service_name="+config.Name,
         "-metadata", "service_provider="+config.Provider,
-
         udpURL,
     )
 
-    // Connect the read end of the pipe to ffmpeg's Stdin
     ffmpegCmd.Stdin = pipeReader
 
-    // Set up output handling for FFmpeg (optional, helps debug)
-    // ffmpegCmd.Stdout = os.Stdout
-    // ffmpegCmd.Stderr = os.Stderr
-
-    // Start yt-dlp
     if err := ytCmd.Start(); err != nil {
-        return fmt.Errorf("could not start yt-dlp: %w", err)
+        return fmt.Errorf("yt-dlp start failed: %w", err)
     }
-
-    // Start ffmpeg
     if err := ffmpegCmd.Start(); err != nil {
-        // If ffmpeg fails, kill yt-dlp to clean up
         ytCmd.Process.Kill()
-        return fmt.Errorf("could not start ffmpeg: %w", err)
+        return fmt.Errorf("ffmpeg start failed: %w", err)
     }
 
-    // Wait for yt-dlp to finish downloading
+    // Wait routine
     go func() {
         ytCmd.Wait()
-        pipeWriter.Close() // Close the pipe so FFmpeg knows input is done
+        pipeWriter.Close()
     }()
 
-    // Wait for FFmpeg to finish processing
     if err := ffmpegCmd.Wait(); err != nil {
-        return fmt.Errorf("ffmpeg exited with error: %w", err)
+        return fmt.Errorf("ffmpeg exited: %w", err)
     }
 
     return nil
