@@ -1,4 +1,4 @@
-# CableCompany - IPTV Viewer
+# CableCompany - IPTV Scanner
 
 A Python-based desktop application for discovering and viewing UDP Multicast streams. Built with **PyQt5** and **LibVLC**, it features a modern dark UI, an embedded video player, and an intelligent network scanner that detects active MPEG-TS streams and extracts channel metadata (SDT) automatically.
 
