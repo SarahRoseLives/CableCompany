@@ -96,3 +96,4 @@ With the Go streamer running, open the Python app and click **Start Scan**. It s
 
   * **Multicast Routing:** If you are on a managed network, ensure your switch supports IGMP Snooping and that your firewall allows UDP traffic on the target ports (Default: 1234).
   * **Linux VLC Embedding:** The player uses `--avcodec-hw=none` and `--no-xlib` flags to ensure stability within the PyQt5 environment on Linux systems.
+
