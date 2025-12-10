@@ -1,10 +1,9 @@
 # ui/video_player.py
-
-import random
+import sys
+import vlc
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QFrame, QSlider, QSizePolicy, QStyle)
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QSize
-from PyQt5.QtGui import QColor
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 
 
 class VideoPlayer(QWidget):
@@ -16,8 +15,15 @@ class VideoPlayer(QWidget):
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
 
-        self.is_playing = False
         self.is_recording = False
+        self.current_channel_name = ""
+
+        # --- VLC Initialization ---
+        # FIXED: Added flags to disable hardware decoding and Xlib integration
+        # --avcodec-hw=none: Prevents the VAAPI crash you saw
+        # --no-xlib: Essential for PyQt/Linux compatibility to prevent thread conflicts
+        self.instance = vlc.Instance("--avcodec-hw=none --no-xlib")
+        self.mediaplayer = self.instance.media_player_new()
 
         self.setup_ui()
 
@@ -26,14 +32,9 @@ class VideoPlayer(QWidget):
         self.video_frame = QFrame()
         self.video_frame.setObjectName("VideoFrame")
         self.video_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.video_frame.setStyleSheet("background-color: black;")
 
-        vf_layout = QVBoxLayout(self.video_frame)
-        self.placeholder = QLabel("Select a channel to start streaming")
-        self.placeholder.setObjectName("PlaceholderText")
-        self.placeholder.setAlignment(Qt.AlignCenter)
-        vf_layout.addWidget(self.placeholder)
-
-        # OSD
+        # OSD (On Screen Display)
         self.osd = QLabel(self.video_frame)
         self.osd.setStyleSheet("background-color: rgba(0,0,0,180); color: white; padding: 10px; border-radius: 4px;")
         self.osd.hide()
@@ -45,7 +46,7 @@ class VideoPlayer(QWidget):
         c_layout = QHBoxLayout(controls)
         c_layout.setContentsMargins(20, 0, 20, 0)
 
-        # Play Button
+        # Play/Pause
         self.play_btn = QPushButton()
         self.play_btn.setFixedSize(40, 40)
         self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
@@ -58,6 +59,9 @@ class VideoPlayer(QWidget):
 
         self.volume_slider = QSlider(Qt.Horizontal)
         self.volume_slider.setFixedWidth(100)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(70)
+        self.volume_slider.valueChanged.connect(self.set_volume)
         self.volume_slider.setStyleSheet("""
             QSlider::groove:horizontal { height: 4px; background: #4a5568; border-radius: 2px; }
             QSlider::sub-page:horizontal { background: #4299e1; border-radius: 2px; }
@@ -75,7 +79,7 @@ class VideoPlayer(QWidget):
         fs_btn.setIcon(self.style().standardIcon(QStyle.SP_TitleBarMaxButton))
         fs_btn.setStyleSheet("background: transparent; border: none;")
 
-        # Layout Assembly
+        # Assemble Layout
         c_layout.addWidget(self.play_btn)
         c_layout.addSpacing(15)
         c_layout.addWidget(vol_icon)
@@ -89,42 +93,64 @@ class VideoPlayer(QWidget):
         self.layout.addWidget(controls)
 
     def play_stream(self, name, ip):
-        self.is_playing = True
-        self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+        self.current_channel_name = name
+
+        if self.mediaplayer.is_playing():
+            self.mediaplayer.stop()
+
+        # UDP Multicast URL
+        url = f"udp://@{ip}:1234"
+
         self.status_message.emit(f"Buffering: {name}...")
 
-        self.placeholder.setText("")
+        media = self.instance.media_new(url)
+        # Network optimization flags
+        media.add_option(":network-caching=300")
+        media.add_option(":clock-jitter=0")
+        media.add_option(":clock-synchro=0")
 
-        # Simulate video content with random gradient
-        c1 = QColor(random.randint(20, 100), random.randint(20, 100), random.randint(100, 200)).name()
-        c2 = QColor(random.randint(20, 100), random.randint(20, 100), random.randint(100, 200)).name()
-        self.video_frame.setStyleSheet(
-            f"QFrame#VideoFrame {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {c1}, stop:1 {c2}); }}")
+        self.mediaplayer.set_media(media)
 
-        # Show OSD
-        self.osd.setText(f"<b>{name}</b><br><span style='font-size:10px; color:#ccc'>1080p | {ip}</span>")
+        # Embed VLC
+        if sys.platform.startswith("linux"):
+            self.mediaplayer.set_xwindow(int(self.video_frame.winId()))
+        elif sys.platform == "win32":
+            self.mediaplayer.set_hwnd(int(self.video_frame.winId()))
+        elif sys.platform == "darwin":
+            self.mediaplayer.set_nsobject(int(self.video_frame.winId()))
+
+        self.mediaplayer.play()
+        self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+
+        self.show_osd(name, ip)
+        QTimer.singleShot(1500, lambda: self.status_message.emit(f"Playing: {name} (Live UDP)"))
+
+    def toggle_play(self):
+        if self.mediaplayer.is_playing():
+            self.mediaplayer.pause()
+            self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+            self.status_message.emit("Paused")
+        else:
+            self.mediaplayer.play()
+            self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+            self.status_message.emit(f"Playing: {self.current_channel_name}")
+
+    def set_volume(self, volume):
+        self.mediaplayer.audio_set_volume(volume)
+
+    def show_osd(self, name, ip):
+        self.osd.setText(f"<b>{name}</b><br><span style='font-size:10px; color:#ccc'>UDP Multicast | {ip}</span>")
         self.osd.adjustSize()
         self.osd.move(self.video_frame.width() - self.osd.width() - 20, 20)
         self.osd.show()
-
-        QTimer.singleShot(2500, self.osd.hide)
-        QTimer.singleShot(1000, lambda: self.status_message.emit(f"Playing: {name} (12 Mbps)"))
-
-    def toggle_play(self):
-        self.is_playing = not self.is_playing
-        icon = QStyle.SP_MediaPause if self.is_playing else QStyle.SP_MediaPlay
-        self.play_btn.setIcon(self.style().standardIcon(icon))
-
-        if not self.is_playing:
-            self.status_message.emit("Paused")
-            self.video_frame.setStyleSheet("QFrame#VideoFrame { background-color: #1a202c; }")
-            self.placeholder.setText("Paused")
+        self.osd.raise_()
+        QTimer.singleShot(4000, self.osd.hide)
 
     def toggle_record(self):
         if self.rec_btn.isChecked():
             self.is_recording = True
             self.rec_btn.setText(" Recording")
-            self.status_message.emit("Recording started...")
+            self.status_message.emit("Recording started (UI Simulation)...")
         else:
             self.is_recording = False
             self.rec_btn.setText(" Record")

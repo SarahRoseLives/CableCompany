@@ -9,7 +9,7 @@ from ui.video_player import VideoPlayer
 class IPTVViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CableCompany - IPTV Viewer Mockup")
+        self.setWindowTitle("CableCompany - IPTV Viewer")
         self.resize(1100, 750)
         self.setStyleSheet(DARK_THEME_QSS)
 

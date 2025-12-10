@@ -3,8 +3,8 @@
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QListWidget, QListWidgetItem,
                              QProgressBar, QStyle)
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QSize
-from core.mock_data import MOCK_CHANNELS
+from PyQt5.QtCore import Qt, pyqtSignal, QSize
+from core.scanner import ScannerWorker
 
 
 class Sidebar(QWidget):
@@ -15,11 +15,13 @@ class Sidebar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("Sidebar")
-        self.setFixedWidth(280)
+        self.setFixedWidth(280)  # Slightly wider for cross-platform fonts
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
+
+        self.scanner_thread = None
 
         self.setup_ui()
 
@@ -88,59 +90,98 @@ class Sidebar(QWidget):
         self.layout.addWidget(footer)
 
     def start_scan(self):
+        # Update UI for scanning state
         self.scan_btn.setEnabled(False)
-        self.scan_btn.setText(" Scanning...")
+        self.scan_btn.setText(" Stop Scan")
+
+        # Switch button functionality to STOP
+        try:
+            self.scan_btn.clicked.disconnect()
+        except TypeError:
+            pass  # Handle case where nothing was connected
+        self.scan_btn.clicked.connect(self.stop_scan)
+
         self.progress_bar.show()
         self.progress_bar.setValue(0)
         self.channel_list.clear()
         self.channel_list.hide()
         self.empty_state.show()
 
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_scan)
-        self.scan_progress = 0
-        self.timer.start(30)
+        # Initialize Real Scanner
+        # Scanning 239.255.0.1 to 239.255.0.20 on port 1234 (Based on your Go code)
+        self.scanner_thread = ScannerWorker(start_ip="239.255.0.1", port=1234, limit=20)
 
-    def update_scan(self):
-        self.scan_progress += 2
-        self.progress_bar.setValue(self.scan_progress)
+        # Connect signals
+        self.scanner_thread.progress.connect(self.update_progress_bar)
+        self.scanner_thread.status.connect(lambda msg: self.status_message.emit(msg))
+        self.scanner_thread.channel_found.connect(self.add_channel_item)
+        self.scanner_thread.finished.connect(self.finish_scan)
 
-        if self.scan_progress >= 100:
-            self.timer.stop()
-            self.finish_scan()
+        self.scanner_thread.start()
 
-    def finish_scan(self):
-        self.scan_btn.setEnabled(True)
-        self.scan_btn.setText(" Scan Network")
-        self.progress_bar.hide()
+    def stop_scan(self):
+        if self.scanner_thread and self.scanner_thread.isRunning():
+            self.status_message.emit("Stopping scan...")
+            self.scanner_thread.stop()
+            self.scanner_thread.wait()
+        # finish_scan will be called by the thread finishing,
+        # but if we forced it, we might need to reset UI manually if the thread logic differs
+        self.finish_scan(0)
+
+    def update_progress_bar(self, val):
+        self.progress_bar.setValue(val)
+
+    def add_channel_item(self, name, ip):
         self.empty_state.hide()
         self.channel_list.show()
 
-        for name, ip in MOCK_CHANNELS:
-            self.add_channel_item(name, ip)
-
-        self.status_message.emit(f"Scan Complete. {len(MOCK_CHANNELS)} channels found.")
-
-    def add_channel_item(self, name, ip):
         item = QListWidgetItem(self.channel_list)
         widget = QWidget()
         layout = QVBoxLayout(widget)
+        # Margins critical for text not being cut off on Linux
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(2)
 
         name_lbl = QLabel(name)
         name_lbl.setStyleSheet("font-weight: bold; color: #e2e8f0; background: transparent;")
 
-        ip_lbl = QLabel(f"{ip}:5000")
+        # Display IP and Port (matching your Go port)
+        ip_lbl = QLabel(f"{ip}:1234")
         ip_lbl.setStyleSheet("color: #718096; font-size: 11px; background: transparent;")
 
         layout.addWidget(name_lbl)
         layout.addWidget(ip_lbl)
 
+        # Set size hint to ensure item has height
         item.setSizeHint(QSize(widget.sizeHint().width(), 55))
+
         self.channel_list.setItemWidget(item, widget)
         # Store data in item for retrieval
         item.setData(Qt.UserRole, (name, ip))
+
+    def finish_scan(self, count):
+        self.scan_btn.setEnabled(True)
+        self.scan_btn.setText(" Scan Network")
+
+        # Reset button functionality to START
+        try:
+            self.scan_btn.clicked.disconnect()
+        except TypeError:
+            pass
+        self.scan_btn.clicked.connect(self.start_scan)
+
+        self.progress_bar.hide()
+
+        # Update status message based on results
+        # Note: 'count' here might be the total found, or just a signal arg
+        # The worker emits the total count found
+        msg = "Scan Complete."
+        if isinstance(count, int) and count > 0:
+            msg = f"Scan Complete. {count} channels found."
+        elif self.channel_list.count() > 0:
+            msg = f"Scan Complete. {self.channel_list.count()} channels found."
+
+        self.status_message.emit(msg)
 
     def on_item_clicked(self, item):
         data = item.data(Qt.UserRole)
