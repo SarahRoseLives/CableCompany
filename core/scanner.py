@@ -1,8 +1,6 @@
-# core/scanner.py
 import socket
 import struct
 import time
-import sys
 from PyQt5.QtCore import QThread, pyqtSignal
 from core.sdt_parser import parse_service_name
 
@@ -13,97 +11,162 @@ class ScannerWorker(QThread):
     finished = pyqtSignal(int)
     status = pyqtSignal(str)
 
-    def __init__(self, start_ip="239.255.0.1", port=1234, limit=20):
+    def __init__(self, mode="smart", custom_range=None, port=1234):
         super().__init__()
-        self.start_ip = start_ip
+        self.mode = mode
+        self.custom_range = custom_range
         self.port = port
-        self.limit = limit
         self.is_running = True
 
+    def generate_smart_beacons(self):
+        beacons = []
+        # Block 1: 239.255.x.1
+        for i in range(0, 256):
+            beacons.append(f"239.255.{i}.1")
+        # Block 2: 239.192.x.1
+        for i in range(0, 50):
+            beacons.append(f"239.192.{i}.1")
+        return beacons
+
+    def generate_range_ips(self, pattern):
+        parts = pattern.split('.')
+        if len(parts) != 4: return []
+
+        def get_range(part):
+            if part == '*': return range(0, 256)
+            return [int(part)]
+
+        ips = []
+        try:
+            for a in get_range(parts[0]):
+                for b in get_range(parts[1]):
+                    for c in get_range(parts[2]):
+                        for d in get_range(parts[3]):
+                            ips.append(f"{a}.{b}.{c}.{d}")
+        except ValueError:
+            pass
+        return ips
+
     def run(self):
-        base_ip = self.start_ip.rsplit('.', 1)[0]
-        start_octet = int(self.start_ip.rsplit('.', 1)[1])
+        scan_queue = []
+        if self.mode == "smart":
+            self.status.emit("Initializing Smart Scan...")
+            scan_queue = self.generate_smart_beacons()
+        else:
+            scan_queue = self.generate_range_ips(self.custom_range)
+
+        visited = set(scan_queue)
         found_count = 0
+        total_estimated = len(scan_queue)
+        processed = 0
 
-        # Create a single socket? No, we need fresh bindings for strict filtering.
+        while scan_queue:
+            # 1. IMMEDIATE STOP CHECK
+            if not self.is_running:
+                break
 
-        for i in range(self.limit):
-            if not self.is_running: break
+            ip = scan_queue.pop(0)
+            processed += 1
 
-            current_octet = start_octet + i
-            ip = f"{base_ip}.{current_octet}"
-            self.status.emit(f"Checking {ip}...")
+            self.status.emit(f"Scanning {ip}...")
 
-            sock = None
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            # Check IP (This method now checks self.is_running internally)
+            is_active = self.check_ip(ip)
 
-                # Allow multiple apps to use this port (VLC + Scanner)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if is_active:
+                found_count += 1
 
-                # --- CRITICAL FIX FOR LINUX ---
-                # Bind DIRECTLY to the multicast IP.
-                # This ensures we only receive packets destined for THIS specific group.
-                # If we bind to '', we get everything on port 1234.
-                try:
-                    sock.bind((ip, self.port))
-                except OSError:
-                    # Fallback for systems that don't allow binding to multicast IP (rare on Linux)
-                    sock.bind(('', self.port))
+                # Adaptive Logic: Add neighbors if we hit a .1 address
+                if self.mode == "smart" and ip.endswith(".1"):
+                    subnet_base = ip.rsplit('.', 1)[0]
+                    self.status.emit(f"🔥 Found subnet {subnet_base}.x! Expanding...")
 
-                # Join Multicast Group
-                group = socket.inet_aton(ip)
-                mreq = struct.pack('4sL', group, socket.INADDR_ANY)
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                    new_ips = []
+                    for i in range(2, 256):
+                        new_ip = f"{subnet_base}.{i}"
+                        if new_ip not in visited:
+                            new_ips.append(new_ip)
+                            visited.add(new_ip)
 
-                # 1. Quick Check (0.2s)
-                # Shorter timeout to speed up scanning of empty space
-                sock.settimeout(0.2)
+                    scan_queue = new_ips + scan_queue
+                    total_estimated += len(new_ips)
 
-                try:
-                    # Peek at data
-                    sock.recv(1316)
-
-                    # 2. Deep Scan (Hunt for SDT)
-                    # We found a signal, now identify it.
-                    channel_name = f"Unknown Channel {current_octet}"
-
-                    # We know data is flowing, so we increase timeout to wait for metadata
-                    sock.settimeout(0.5)
-                    start_hunt = time.time()
-
-                    # Hunt for up to 2 seconds
-                    while time.time() - start_hunt < 2.0:
-                        if not self.is_running: break
-                        try:
-                            chunk = sock.recv(4096)
-                            name = parse_service_name(chunk)
-                            if name:
-                                channel_name = name
-                                break
-                        except socket.timeout:
-                            break
-
-                    self.channel_found.emit(channel_name, ip)
-                    found_count += 1
-
-                except socket.timeout:
-                    pass  # Silence is golden (no channel here)
-
-                # Cleanup
-                try:
-                    sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
-                except:
-                    pass
-                sock.close()
-
-            except Exception as e:
-                # print(f"Error scanning {ip}: {e}") # Debug only
-                if sock: sock.close()
-
-            self.progress.emit(int((i + 1) / self.limit * 100))
+            # Update Progress
+            if total_estimated > 0:
+                percent = min(100, int((processed / total_estimated) * 100))
+                self.progress.emit(percent)
 
         self.finished.emit(found_count)
 
+    def check_ip(self, ip):
+        sock = None
+        found = False
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+            # Bind logic
+            try:
+                sock.bind((ip, self.port))
+            except OSError:
+                sock.bind(('', self.port))
+
+            group = socket.inet_aton(ip)
+            mreq = struct.pack('4sL', group, socket.INADDR_ANY)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+            # --- PHASE 1: FAST CHECK ---
+            # Use a very short timeout (0.1s)
+            sock.settimeout(0.1)
+            try:
+                # Try to peek at data
+                sock.recv(1316)
+
+                # Use a second check to ensure we stop immediately if button pressed
+                if not self.is_running:
+                    sock.close()
+                    return False
+
+                # --- PHASE 2: DEEP SCAN ---
+                channel_name = f"Unknown {ip}"
+
+                # Keep timeout short (0.1s) but loop many times (20 * 0.1 = 2.0s)
+                # This makes the loop check 'is_running' 10 times per second
+                start_hunt = time.time()
+
+                while time.time() - start_hunt < 2.0:
+                    # CRITICAL: Check stop flag inside the hunt loop
+                    if not self.is_running:
+                        sock.close()
+                        return False
+
+                    try:
+                        chunk = sock.recv(4096)
+                        name = parse_service_name(chunk)
+                        if name:
+                            channel_name = name
+                            break
+                    except socket.timeout:
+                        pass  # Just loop again and check is_running
+
+                self.channel_found.emit(channel_name, ip)
+                found = True
+
+            except socket.timeout:
+                pass  # No signal
+
+            # Cleanup
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
+            except:
+                pass
+            sock.close()
+
+        except Exception:
+            if sock: sock.close()
+
+        return found
+
     def stop(self):
+        """Sets the flag to stop the thread safely."""
         self.is_running = False
