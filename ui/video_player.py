@@ -15,13 +15,11 @@ class VideoPlayer(QWidget):
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
 
-        self.is_recording = False
         self.current_channel_name = ""
 
         # --- VLC Initialization ---
-        # FIXED: Added flags to disable hardware decoding and Xlib integration
-        # --avcodec-hw=none: Prevents the VAAPI crash you saw
-        # --no-xlib: Essential for PyQt/Linux compatibility to prevent thread conflicts
+        # --avcodec-hw=none: Prevents VAAPI crash on Linux
+        # --no-xlib: Essential for PyQt/Linux compatibility
         self.instance = vlc.Instance("--avcodec-hw=none --no-xlib")
         self.mediaplayer = self.instance.media_player_new()
 
@@ -34,7 +32,7 @@ class VideoPlayer(QWidget):
         self.video_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.video_frame.setStyleSheet("background-color: black;")
 
-        # OSD (On Screen Display)
+        # OSD
         self.osd = QLabel(self.video_frame)
         self.osd.setStyleSheet("background-color: rgba(0,0,0,180); color: white; padding: 10px; border-radius: 4px;")
         self.osd.hide()
@@ -68,25 +66,18 @@ class VideoPlayer(QWidget):
             QSlider::handle:horizontal { background: white; width: 12px; margin: -4px 0; border-radius: 6px; }
         """)
 
-        # Record Button
-        self.rec_btn = QPushButton("Record")
-        self.rec_btn.setObjectName("RecordBtn")
-        self.rec_btn.setCheckable(True)
-        self.rec_btn.clicked.connect(self.toggle_record)
-
         # Fullscreen Icon
         fs_btn = QPushButton()
         fs_btn.setIcon(self.style().standardIcon(QStyle.SP_TitleBarMaxButton))
         fs_btn.setStyleSheet("background: transparent; border: none;")
 
-        # Assemble Layout
+        # Assemble Layout (Record button removed)
         c_layout.addWidget(self.play_btn)
         c_layout.addSpacing(15)
         c_layout.addWidget(vol_icon)
         c_layout.addWidget(self.volume_slider)
         c_layout.addStretch()
-        c_layout.addWidget(self.rec_btn)
-        c_layout.addSpacing(10)
+        # Removed Rec Btn here
         c_layout.addWidget(fs_btn)
 
         self.layout.addWidget(self.video_frame)
@@ -98,20 +89,16 @@ class VideoPlayer(QWidget):
         if self.mediaplayer.is_playing():
             self.mediaplayer.stop()
 
-        # UDP Multicast URL
         url = f"udp://@{ip}:1234"
-
         self.status_message.emit(f"Buffering: {name}...")
 
         media = self.instance.media_new(url)
-        # Network optimization flags
         media.add_option(":network-caching=300")
         media.add_option(":clock-jitter=0")
         media.add_option(":clock-synchro=0")
 
         self.mediaplayer.set_media(media)
 
-        # Embed VLC
         if sys.platform.startswith("linux"):
             self.mediaplayer.set_xwindow(int(self.video_frame.winId()))
         elif sys.platform == "win32":
@@ -145,13 +132,3 @@ class VideoPlayer(QWidget):
         self.osd.show()
         self.osd.raise_()
         QTimer.singleShot(4000, self.osd.hide)
-
-    def toggle_record(self):
-        if self.rec_btn.isChecked():
-            self.is_recording = True
-            self.rec_btn.setText(" Recording")
-            self.status_message.emit("Recording started (UI Simulation)...")
-        else:
-            self.is_recording = False
-            self.rec_btn.setText(" Record")
-            self.status_message.emit("Recording Saved.")

@@ -1,6 +1,6 @@
 # ui/main_window.py
 
-from PyQt5.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QLabel
+from PyQt5.QtWidgets import QMainWindow, QWidget, QHBoxLayout
 from assets.styles import DARK_THEME_QSS
 from ui.sidebar import Sidebar
 from ui.video_player import VideoPlayer
@@ -9,7 +9,7 @@ from ui.video_player import VideoPlayer
 class IPTVViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CableCompany - IPTV Viewer")
+        self.setWindowTitle("CableCompany - IPTV Viewer Mockup")
         self.resize(1100, 750)
         self.setStyleSheet(DARK_THEME_QSS)
 
@@ -50,19 +50,7 @@ class IPTVViewer(QMainWindow):
     def create_status_bar(self):
         self.status = self.statusBar()
         self.status.showMessage("Ready")
-
-        container = QWidget()
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 10, 0)
-
-        lbl1 = QLabel("Multicast: Idle")
-        lbl2 = QLabel("Disk: 450GB Free")
-
-        layout.addWidget(lbl1)
-        layout.addSpacing(15)
-        layout.addWidget(lbl2)
-
-        self.status.addPermanentWidget(container)
+        # Removed "Online" indicator and Version number logic here
 
     def update_status(self, message):
         self.status.showMessage(message)
